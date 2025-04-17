@@ -179,6 +179,37 @@ pub trait IoAccess64<const SIZE: usize = 0>: IoAccess<SIZE> {
     define_io_access_function!(@write write64_unchecked, write64, try_write64, u64);
 }
 
+/// Io Relaxed Access functions.
+///
+/// Similar to [`IoAccess`] but using relaxed memory boundries.
+/// Callers should carefully document the usage of these functions.
+pub trait IoAccessRelaxed<const SIZE: usize = 0>: IoAccess<SIZE> {
+    define_io_access_function!(@read
+        read8_relaxed_unchecked, read8_relaxed, try_read8_relaxed, u8;
+        read16_relaxed_unchecked, read16_relaxed, try_read16_relaxed, u16;
+        read32_relaxed_unchecked, read32_relaxed, try_read32_relaxed, u32;
+    );
+
+    define_io_access_function!(@write
+        write8_relaxed_unchecked, write8_relaxed, try_write8_relaxed, u8;
+        write16_relaxed_unchecked, write16_relaxed, try_write16_relaxed, u16;
+        write32_relaxed_unchecked, write32_relaxed, try_write32_relaxed, u32;
+    );
+}
+
+/// Extending trait of [`IoAccessRelaxed`] offering 64 bit functions.
+#[cfg(CONFIG_64BIT)]
+pub trait IoAccess64Relaxed<const SIZE: usize = 0>: IoAccess<SIZE> + IoAccessRelaxed<SIZE> {
+    define_io_access_function!(
+    @read
+    read64_relaxed_unchecked, read64_relaxed, try_read64_relaxed, u64;
+    );
+
+    define_io_access_function!(@write
+        write64_relaxed_unchecked, write64_relaxed, try_write64_relaxed, u64;
+    );
+}
+
 /// Raw representation of an MMIO region.
 ///
 /// By itself, the existence of an instance of this structure does not provide any guarantees that
@@ -276,5 +307,83 @@ unsafe impl<const SIZE: usize> IoAccess<SIZE> for Io<SIZE> {
 impl<const SIZE: usize> IoAccess64<SIZE> for Io<SIZE> {
     impl_accessor_fn!(
     read64_unchecked, ioread64, write64_unchecked, iowrite64, u64;
+    );
+}
+
+/// IO-mapped memory, starting at the base address [`addr`] and spanning [`maxsize`] bytes.
+///
+/// The creator (usually a subsystem / bus such as PCI) is responsible for creating the
+/// mapping, performing an additional region request, etc.
+///
+/// # Invariant
+///
+/// [`addr`] is the start and [`maxsize`] the length of valid I/O mapped memory region of size [`maxsize`].
+///
+/// [`addr`]: IoAccess::addr
+/// [`maxsize`]: IoAccess::maxsize
+#[repr(transparent)]
+pub struct MMIo<const SIZE: usize = 0>(IoRaw<SIZE>);
+
+impl<const SIZE: usize> MMIo<SIZE> {
+    /// Convert a [`IoRaw`] into an [`MMIo`] instance, providing the accessors to the MMIO mapping.
+    ///
+    /// # Safety
+    ///
+    /// Callers must ensure that `addr` is the start of a valid I/O mapped memory region of size `maxsize`.
+    #[inline]
+    pub unsafe fn from_raw(raw: IoRaw<SIZE>) -> Self {
+        Self(raw)
+    }
+
+    /// Convert a ref to [`IoRaw`] into an [`MMIo`] instance, providing the accessors to the MMIo mapping.
+    ///
+    /// # Safety
+    ///
+    /// Callers must ensure that `addr` is the start of a valid I/O mapped memory region of size `maxsize`.
+    #[inline]
+    pub unsafe fn from_raw_ref(raw: &IoRaw<SIZE>) -> &Self {
+        // SAFETY: `MMIo` is a transparent wrapper around `IoRaw`.
+        unsafe { &*core::ptr::from_ref(raw).cast() }
+    }
+}
+
+// SAFETY: as per invariant `raw` is valid
+unsafe impl<const SIZE: usize> IoAccess<SIZE> for MMIo<SIZE> {
+    #[inline]
+    fn maxsize(&self) -> usize {
+        self.0.maxsize()
+    }
+
+    #[inline]
+    fn addr(&self) -> usize {
+        self.0.addr()
+    }
+
+    impl_accessor_fn!(
+    read8_unchecked, readb, write8_unchecked, writeb, u8;
+    read16_unchecked, readw, write16_unchecked, writew, u16;
+    read32_unchecked, readl, write32_unchecked, writel, u32;
+    );
+}
+
+#[cfg(CONFIG_64BIT)]
+impl<const SIZE: usize> IoAccess64<SIZE> for MMIo<SIZE> {
+    impl_accessor_fn!(
+    read64_unchecked, readq, write64_unchecked, writeq, u64;
+    );
+}
+
+impl<const SIZE: usize> IoAccessRelaxed<SIZE> for MMIo<SIZE> {
+    impl_accessor_fn!(
+    read8_relaxed_unchecked, readb_relaxed, write8_relaxed_unchecked, writeb_relaxed, u8;
+    read16_relaxed_unchecked, readw_relaxed, write16_relaxed_unchecked, writew_relaxed, u16;
+    read32_relaxed_unchecked, readl_relaxed, write32_relaxed_unchecked, writel_relaxed, u32;
+    );
+}
+
+#[cfg(CONFIG_64BIT)]
+impl<const SIZE: usize> IoAccess64Relaxed<SIZE> for MMIo<SIZE> {
+    impl_accessor_fn!(
+    read64_relaxed_unchecked, readq_relaxed, write64_relaxed_unchecked, writeq_relaxed, u64;
     );
 }
