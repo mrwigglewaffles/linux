@@ -387,3 +387,84 @@ impl<const SIZE: usize> IoAccess64Relaxed<SIZE> for MMIo<SIZE> {
     read64_relaxed_unchecked, readq_relaxed, write64_relaxed_unchecked, writeq_relaxed, u64;
     );
 }
+
+/// Port-IO, starting at the base address [`addr`] and spanning [`maxsize`] bytes.
+///
+/// The creator is responsible for performing an additional region request, etc.
+///
+/// # Invariant
+///
+/// [`addr`] is the start and [`maxsize`] the length of a valid port io region of size [`maxsize`].
+///
+/// [`addr`]: IoAccess::addr
+/// [`maxsize`]: IoAccess::maxsize
+#[repr(transparent)]
+pub struct PortIo<const SIZE: usize = 0>(IoRaw<SIZE>);
+
+impl<const SIZE: usize> PortIo<SIZE> {
+    /// Convert a [`IoRaw`] into an [`PortIo`] instance, providing the accessors to the
+    /// PortIo mapping.
+    ///
+    /// # Safety
+    ///
+    /// Callers must ensure that `addr` is the start of a valid Port I/O region of size `maxsize`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use kernel::io::{IoRaw, PortIo, IoAccess};
+    ///
+    /// let raw = IoRaw::<2>::new(0xDEADBEEFC0DE, 2).unwrap();
+    /// // SAFETY: test, value is not actually written to.
+    /// let mmio: PortIo<2> = unsafe { PortIo::from_raw(raw) };
+    /// # assert_eq!(raw.addr(), mmio.addr());
+    /// # assert_eq!(raw.maxsize(), mmio.maxsize());
+    /// ```
+    #[inline]
+    pub unsafe fn from_raw(raw: IoRaw<SIZE>) -> Self {
+        Self(raw)
+    }
+
+    /// Convert a ref to [`IoRaw`] into an [`PortIo`] instance, providing the accessors to the
+    /// PortIo mapping.
+    ///
+    /// # Safety
+    ///
+    /// Callers must ensure that `addr` is the start of a valid I/O mapped memory region of size `maxsize`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use kernel::io::{IoRaw, PortIo, IoAccess};
+    ///
+    /// let raw = IoRaw::<2>::new(0xDEADBEEFC0DE, 2).unwrap();
+    /// // SAFETY: test, value is not actually written to.
+    /// let mmio: &PortIo<2> = unsafe { PortIo::from_raw_ref(&raw) };
+    /// # assert_eq!(raw.addr(), mmio.addr());
+    /// # assert_eq!(raw.maxsize(), mmio.maxsize());
+    /// ```
+    #[inline]
+    pub unsafe fn from_raw_ref(raw: &IoRaw<SIZE>) -> &Self {
+        // SAFETY: `PortIo` is a transparent wrapper around `IoRaw`.
+        unsafe { &*core::ptr::from_ref(raw).cast() }
+    }
+}
+
+// SAFETY: as per invariant `raw` is valid
+unsafe impl<const SIZE: usize> IoAccess<SIZE> for PortIo<SIZE> {
+    #[inline]
+    fn maxsize(&self) -> usize {
+        self.0.maxsize()
+    }
+
+    #[inline]
+    fn addr(&self) -> usize {
+        self.0.addr()
+    }
+
+    impl_accessor_fn!(
+    read8_unchecked, inb, write8_unchecked, outb, u8;
+    read16_unchecked, inw, write16_unchecked, outw, u16;
+    read32_unchecked, inl, write32_unchecked, outl, u32;
+    );
+}
