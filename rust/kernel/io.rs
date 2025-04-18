@@ -6,6 +6,9 @@
 
 use crate::error::{code::EINVAL, Result};
 use crate::{bindings, build_assert};
+use core::marker::PhantomData;
+use core::ops::Deref;
+use io_backend::*;
 
 /// Private macro to define the [`IoAccess`] functions.
 macro_rules! define_io_access_function {
@@ -210,6 +213,48 @@ pub trait IoAccess64Relaxed<const SIZE: usize = 0>: IoAccess<SIZE> + IoAccessRel
     );
 }
 
+#[cfg(CONFIG_GENERIC_IOMAP)]
+mod io_backend {
+    // if generic_iomap is enabled copy the logic from IO_COND from lib/iomap.c
+
+    #[inline]
+    pub(super) fn is_mmio(addr: usize) -> bool {
+        addr >= bindings::PIO_RESERVED as usize
+    }
+
+    #[inline]
+    pub(super) fn is_portio(addr: usize) -> bool {
+        !is_mmio(addr) && addr > bindings::PIO_OFFSET as usize
+    }
+
+    #[inline]
+    pub(super) fn to_cookie(addr: usize) -> usize {
+        addr & bindings::PIO_MASK as usize
+    }
+}
+
+#[cfg(not(CONFIG_GENERIC_IOMAP))]
+mod io_backend {
+    // for everyone who does not use generic iomap
+    // ioread maps to the same backend as portio and mmio
+    // except for alpha and parisc, neither of which has a rust compiler
+    // so allow any io to be converted into a mmio or PortIo
+    #[inline]
+    pub(super) fn is_mmio(_addr: usize) -> bool {
+        true
+    }
+
+    #[inline]
+    pub(super) fn is_portio(_addr: usize) -> bool {
+        true
+    }
+
+    #[inline]
+    pub(super) fn to_cookie(addr: usize) -> usize {
+        addr
+    }
+}
+
 /// Raw representation of an MMIO region.
 ///
 /// By itself, the existence of an instance of this structure does not provide any guarantees that
@@ -272,6 +317,79 @@ impl<const SIZE: usize> Io<SIZE> {
         Self(raw)
     }
 
+    #[inline]
+    /// Returns the maximum size of the accessed IO area.
+    pub fn maxsize(&self) -> usize {
+        self.0.maxsize()
+    }
+
+    #[inline]
+    /// Returns the base address of the accessed IO area.
+    pub fn addr(&self) -> usize {
+        self.0.addr()
+    }
+
+    /// convert [`Io`] to [`PortIo`]
+    pub fn try_into_portio(self) -> Option<PortIo<SIZE>> {
+        if is_portio(self.addr()) {
+            let cookie = to_cookie(self.addr());
+            let raw = IoRaw {
+                addr: cookie,
+                maxsize: self.0.maxsize(),
+            };
+            return unsafe { Some(PortIo::from_raw(raw)) };
+        }
+        None
+    }
+
+    /// convert [`Io`] to [`MMIo`]
+    pub fn try_into_mmio(self) -> Option<MMIo<SIZE>> {
+        if is_mmio(self.addr()) {
+            let raw = IoRaw {
+                addr: self.0.addr(),
+                maxsize: self.0.maxsize(),
+            };
+            return unsafe { Some(MMIo::from_raw(raw)) };
+        }
+        None
+    }
+
+    /// Tries to Convert an `&Io` into a type that acts like a `&PortIO`
+    pub fn into_port_ref<'a>(&'a self) -> Option<impl Deref<Target = PortIo<SIZE>> + 'a> {
+        /// we may want to convert a &Io into a &PortIo but unlike MMIo which has
+        /// the same internal layout as Io. PortIo's address is changed so we create
+        /// a type that derefs into a PortIo and will not outlive the input
+        struct PortIoWrapper<'a, const SIZE: usize = 0>(PortIo<SIZE>, PhantomData<&'a ()>);
+        impl<'a, const SIZE: usize> Deref for PortIoWrapper<'a, SIZE> {
+            type Target = PortIo<SIZE>;
+            fn deref(&self) -> &Self::Target {
+                &self.0
+            }
+        }
+
+        if is_portio(self.addr()) {
+            let cookie = to_cookie(self.addr());
+            let max = self.0.maxsize();
+            match IoRaw::new(cookie, max) {
+                Ok(raw) => Some(PortIoWrapper(PortIo(raw), PhantomData)),
+                Err(_) => None,
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Tries to convert an `&Io` into a `&MMIo`
+    pub fn into_mmio_ref(&self) -> Option<&MMIo<SIZE>> {
+        if is_mmio(self.addr()) {
+            // SAFETY:
+            // an Io and MMio have the same layout and are transparent
+            Some(unsafe { &*core::ptr::from_ref(self).cast() })
+        } else {
+            None
+        }
+    }
+
     /// Convert a ref to [`IoRaw`] into an [`Io`] instance, providing the accessors to the Io mapping.
     ///
     /// # Safety
@@ -282,32 +400,6 @@ impl<const SIZE: usize> Io<SIZE> {
         // SAFETY: `Io` is a transparent wrapper around `IoRaw`.
         unsafe { &*core::ptr::from_ref(raw).cast() }
     }
-}
-
-// SAFETY: as per invariant `raw` is valid
-unsafe impl<const SIZE: usize> IoAccess<SIZE> for Io<SIZE> {
-    #[inline]
-    fn maxsize(&self) -> usize {
-        self.0.maxsize()
-    }
-
-    #[inline]
-    fn addr(&self) -> usize {
-        self.0.addr()
-    }
-
-    impl_accessor_fn!(
-    read8_unchecked,  ioread8, write8_unchecked,   iowrite8, u8;
-    read16_unchecked, ioread16, write16_unchecked, iowrite16, u16;
-    read32_unchecked, ioread32, write32_unchecked, iowrite32, u32;
-    );
-}
-
-#[cfg(CONFIG_64BIT)]
-impl<const SIZE: usize> IoAccess64<SIZE> for Io<SIZE> {
-    impl_accessor_fn!(
-    read64_unchecked, ioread64, write64_unchecked, iowrite64, u64;
-    );
 }
 
 /// IO-mapped memory, starting at the base address [`addr`] and spanning [`maxsize`] bytes.

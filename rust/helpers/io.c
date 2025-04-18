@@ -73,9 +73,3 @@ define_rust_pio_write_helper(outb, u8);
 define_rust_pio_write_helper(outw, u16);
 define_rust_pio_write_helper(outl, u32);
 
-
-#ifdef CONFIG_64BIT
-define_rust_mmio_write_helper(iowrite64, u64);
-define_rust_mmio_read_helper(ioread64, u64);
-#endif
-
