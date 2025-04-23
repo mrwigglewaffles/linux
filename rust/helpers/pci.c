@@ -21,3 +21,8 @@ bool rust_helper_dev_is_pci(const struct device *dev)
 {
 	return dev_is_pci(dev);
 }
+
+unsigned long rust_helper_pci_resource_flags(struct pci_dev *dev, int bar){
+	 return pci_resource_flags(dev, bar);
+}
+

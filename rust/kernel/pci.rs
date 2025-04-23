@@ -11,8 +11,7 @@ use crate::{
     devres::Devres,
     driver,
     error::{to_result, Result},
-    io::Io,
-    io::IoRaw,
+    io::{Io, IoRaw, MMIo, PortIo},
     str::CStr,
     types::{ARef, ForeignOwnable, Opaque},
     ThisModule,
@@ -263,7 +262,8 @@ pub struct Device<Ctx: device::DeviceContext = device::Normal>(
 /// memory mapped PCI bar and its size.
 pub struct Bar<const SIZE: usize = 0> {
     pdev: ARef<Device>,
-    io: IoRaw<SIZE>,
+    original_ioptr: usize,
+    io: Io<SIZE>,
     num: i32,
 }
 
@@ -299,7 +299,7 @@ impl<const SIZE: usize> Bar<SIZE> {
             return Err(ENOMEM);
         }
 
-        let io = match IoRaw::new(ioptr, len as usize) {
+        let raw = match IoRaw::new(ioptr, len as usize) {
             Ok(io) => io,
             Err(err) => {
                 // SAFETY:
@@ -311,8 +311,29 @@ impl<const SIZE: usize> Bar<SIZE> {
             }
         };
 
+        let io: Io<SIZE>;
+        // SAFETY:
+        // `pdev` is valid by the invariants of `Device`.
+        // `num` is checked for validity by a previous call to `Device::resource_len`.
+        let flags = unsafe { bindings::pci_resource_flags(pdev.as_raw(), num) };
+
+        if flags & bindings::IORESOURCE_IO as usize != 0 {
+            // SAFETY:
+            // we know that this is port io by the check above
+            // raw is valid to be accessed through ioread/write
+            io = unsafe { Io::PortIo(PortIo::from_raw_cookie(raw)) };
+        } else if flags & bindings::IORESOURCE_MEM as usize != 0 {
+            // SAFETY:
+            // we know that this is mm io by the check above
+            // raw is valid to be accessed through ioread/write
+            io = unsafe { Io::MMIo(MMIo::from_raw_cookie(raw)) };
+        } else {
+            return Err(EINVAL);
+        }
+
         Ok(Bar {
             pdev: pdev.into(),
+            original_ioptr: ioptr,
             io,
             num,
         })
@@ -334,7 +355,7 @@ impl<const SIZE: usize> Bar<SIZE> {
 
     fn release(&self) {
         // SAFETY: The safety requirements are guaranteed by the type invariant of `self.pdev`.
-        unsafe { Self::do_release(&self.pdev, self.io.addr(), self.num) };
+        unsafe { Self::do_release(&self.pdev, self.original_ioptr, self.num) };
     }
 }
 
@@ -355,8 +376,7 @@ impl<const SIZE: usize> Deref for Bar<SIZE> {
     type Target = Io<SIZE>;
 
     fn deref(&self) -> &Self::Target {
-        // SAFETY: By the type invariant of `Self`, the MMIO range in `self.io` is properly mapped.
-        unsafe { Io::from_raw(&self.io) }
+        &self.io
     }
 }
 
