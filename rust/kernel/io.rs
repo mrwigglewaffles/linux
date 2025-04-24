@@ -11,7 +11,8 @@
 // document differences between from_raw and from_raw_cookie
 // mention that `.addr()` might not be the same address that is passed in
 //  when created with `from_raw_cookie`
-//
+// make sure that PortIo's and MMIo's read/write are inlined so that
+//  the compile time bounds checks work
 
 use io_backend::*;
 
@@ -175,14 +176,14 @@ macro_rules! impl_accessor_fn {
 	$(#[$attr])*
 	$vis unsafe fn $fn_rust(&self, offset: usize) -> $type_name {
 	    // SAFETY: by the safety requirement of the function `self.addr() + offset` is valid to read
-	    unsafe { bindings::$fn_c((self.addr() + offset) as _) }
+	    unsafe { bindings::$fn_c(self.addr().unchecked_add(offset) as _) }
 	}
     };
     (@write $(#[$attr:meta])* $vis:vis $fn_rust:ident, $fn_c:ident, $type_name:ty) => {
 	$(#[$attr])*
 	$vis unsafe fn $fn_rust(&self, value: $type_name, offset: usize) {
 	    // SAFETY: by the safety requirement of the function `self.addr() + offset` is valid to write
-	    unsafe { bindings::$fn_c(value, (self.addr() + offset) as _) }
+	    unsafe { bindings::$fn_c(value, self.addr().unchecked_add(offset) as _) }
 	}
     };
     (
@@ -201,6 +202,7 @@ macro_rules! impl_accessor_fn {
 }
 
 /// Check if the offset is valid to still support the type U in the given size
+#[inline]
 const fn offset_valid<U>(offset: usize, size: usize) -> bool {
     let type_size = core::mem::size_of::<U>();
     if let Some(end) = offset.checked_add(type_size) {
@@ -618,4 +620,86 @@ impl<const SIZE: usize> Io<SIZE> {
             Err(EINVAL)
         }
     }
+}
+
+macro_rules! define_io_enum_access_function {
+    (@read $(#[$attr:meta])* $name_unchecked:ident, $name:ident, $type_name:ty) => {
+    /// Read data from a given offset without doing any bound checks.
+    /// The offset is relative to the base address of Self.
+    ///
+    /// # Safety
+    ///
+    /// The offset has to be valid for self.
+    $(#[$attr])*
+	#[inline]
+    unsafe fn $name_unchecked(&self, offset: usize) -> $type_name {
+        unsafe {
+            match &self {
+                Self::MMIo(io) => io.$name_unchecked(offset),
+                Self::PortIo(io) => io.$name_unchecked(offset),
+            }
+        }
+    }
+
+    $(#[$attr])*
+	#[inline]
+	fn $name(&self, offset: usize) -> $type_name {
+	    build_assert!(offset_valid::<$type_name>(offset, SIZE));
+
+	    // SAFETY: offset checked to be valid above.
+	    unsafe { self.$name_unchecked(offset) }
+	}
+
+    };
+    (@write $(#[$attr:meta])* $name_unchecked:ident, $name:ident, $type_name:ty) => {
+    /// Read data from a given offset without doing any bound checks.
+    /// The offset is relative to the base address of Self.
+    ///
+    /// # Safety
+    ///
+    /// The offset has to be valid for self.
+    $(#[$attr])*
+	#[inline]
+    unsafe fn $name_unchecked(&self, value: $type_name, offset: usize){
+        unsafe {
+            match &self {
+                Self::MMIo(io) => io.$name_unchecked(value, offset),
+                Self::PortIo(io) => io.$name_unchecked(value, offset),
+            }
+        }
+    }
+
+	$(#[$attr])*
+	#[inline]
+	fn $name(&self, value: $type_name, offset: usize) {
+	    build_assert!(offset_valid::<$type_name>(offset, SIZE));
+
+	    // SAFETY: offset checked to be valid above.
+	    unsafe { self.$name_unchecked(value, offset) }
+	}
+
+    };
+}
+
+unsafe impl<const SIZE: usize> IoAccess<SIZE> for Io<SIZE> {
+    #[inline]
+    fn addr(&self) -> usize {
+        match &self {
+            Self::MMIo(io) => io.addr(),
+            Self::PortIo(io) => io.addr(),
+        }
+    }
+    #[inline]
+    fn maxsize(&self) -> usize {
+        match &self {
+            Self::MMIo(io) => io.maxsize(),
+            Self::PortIo(io) => io.maxsize(),
+        }
+    }
+    define_io_enum_access_function!(@read read8_unchecked, read8, u8);
+    define_io_enum_access_function!(@read read16_unchecked, read16, u16);
+    define_io_enum_access_function!(@read read32_unchecked, read32, u32);
+    define_io_enum_access_function!(@write write8_unchecked, write8, u8);
+    define_io_enum_access_function!(@write write16_unchecked, write16, u16);
+    define_io_enum_access_function!(@write write32_unchecked, write32, u32);
 }
