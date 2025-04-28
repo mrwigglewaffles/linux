@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 
-use kernel::{bindings, c_str, device::Core, pci, prelude::*};
+use kernel::{bindings, c_str, device::Core, io::MMIo, pci, prelude::*};
 
 use crate::gpu::Gpu;
 
@@ -11,7 +11,7 @@ pub(crate) struct NovaCore {
 }
 
 const BAR0_SIZE: usize = 8;
-pub(crate) type Bar0 = pci::Bar<BAR0_SIZE>;
+pub(crate) type Bar0 = pci::Bar<BAR0_SIZE, MMIo<BAR0_SIZE>>;
 
 kernel::pci_device_table!(
     PCI_TABLE,
@@ -33,7 +33,7 @@ impl pci::Driver for NovaCore {
         pdev.enable_device_mem()?;
         pdev.set_master();
 
-        let bar = pdev.iomap_region_sized::<BAR0_SIZE>(0, c_str!("nova-core/bar0"))?;
+        let bar = pdev.iomap_region_sized::<BAR0_SIZE, _>(0, c_str!("nova-core/bar0"))?;
 
         let this = KBox::pin_init(
             try_pin_init!(Self {
