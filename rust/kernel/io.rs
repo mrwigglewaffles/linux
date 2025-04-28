@@ -224,6 +224,10 @@ pub unsafe trait IoAccess<const SIZE: usize = 0> {
     /// Returns the base address of the accessed IO area.
     fn addr(&self) -> usize;
 
+    unsafe fn from_raw_cookie(raw: IoRaw<SIZE>) -> Result<Self>
+    where
+        Self: Sized;
+
     #[rustfmt::skip]
     define_io_access_function!(@read
         read8_unchecked, read8, try_read8, u8;
@@ -392,29 +396,6 @@ impl<const SIZE: usize> MMIo<SIZE> {
         Self(raw)
     }
 
-    /// Convert a [`IoRaw`] into an [`MMIo`] instance, providing the accessors to the MMIO mapping.
-    ///
-    /// # Safety
-    ///
-    /// Callers must ensure that `addr` is the start of a valid I/O mapped memory region of size `maxsize`.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use kernel::io::{IoRaw, MMIo, IoAccess};
-    ///
-    /// let raw = IoRaw::<2>::new(0xDEADBEEFC0DE, 2).unwrap();
-    /// // SAFETY: test, value is not actually written to.
-    /// let mmio: MMIo<2> = unsafe { MMIo::from_raw(raw) };
-    /// # assert_eq!(raw.addr(), mmio.addr());
-    /// # assert_eq!(raw.maxsize(), mmio.maxsize());
-    /// ```
-    #[inline]
-    pub unsafe fn from_raw_cookie(mut raw: IoRaw<SIZE>) -> Self {
-        raw.addr = mmio_to_addr(raw.addr);
-        Self(raw)
-    }
-
     /// Convert a ref to [`IoRaw`] into an [`MMIo`] instace, providing the accessors to the MMIo mapping.
     ///
     /// # Safety
@@ -444,6 +425,16 @@ unsafe impl<const SIZE: usize> IoAccess<SIZE> for MMIo<SIZE> {
     #[inline]
     fn maxsize(&self) -> usize {
         self.0.maxsize()
+    }
+
+    #[inline]
+    unsafe fn from_raw_cookie(mut raw: IoRaw<SIZE>) -> Result<Self> {
+        if is_mmio(raw.addr()) {
+            raw.addr = mmio_to_addr(raw.addr);
+            Ok(Self(raw))
+        } else {
+            Err(EINVAL)
+        }
     }
 
     #[inline]
@@ -521,29 +512,6 @@ impl<const SIZE: usize> PortIo<SIZE> {
         Self(raw)
     }
 
-    /// Convert a [`IoRaw`] into an [`PortIo`] instance, providing the accessors to the PortIo mapping.
-    ///
-    /// # Safety
-    ///
-    /// Callers must ensure that `addr` is the start of a valid Port I/O region of size `maxsize`.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use kernel::io::{IoRaw, PortIo, IoAccess};
-    ///
-    /// let raw = IoRaw::<2>::new(0xDEADBEEFC0DE, 2).unwrap();
-    /// // SAFETY: test, value is not actually written to.
-    /// let mmio: PortIo<2> = unsafe { PortIo::from_raw(raw) };
-    /// # assert_eq!(raw.addr(), mmio.addr());
-    /// # assert_eq!(raw.maxsize(), mmio.maxsize());
-    /// ```
-    #[inline]
-    pub unsafe fn from_raw_cookie(mut raw: IoRaw<SIZE>) -> Self {
-        raw.addr = pio_to_addr(raw.addr);
-        Self(raw)
-    }
-
     /// Convert a ref to [`IoRaw`] into an [`PortIo`] instace, providing the accessors to the PortIo mapping.
     ///
     /// # Safety
@@ -576,6 +544,16 @@ unsafe impl<const SIZE: usize> IoAccess<SIZE> for PortIo<SIZE> {
     }
 
     #[inline]
+    unsafe fn from_raw_cookie(mut raw: IoRaw<SIZE>) -> Result<Self> {
+        if is_portio(raw.addr()) {
+            raw.addr = pio_to_addr(raw.addr);
+            Ok(Self(raw))
+        } else {
+            Err(EINVAL)
+        }
+    }
+
+    #[inline]
     fn addr(&self) -> usize {
         self.0.addr()
     }
@@ -593,34 +571,7 @@ pub enum Io<const SIZE: usize = 0> {
     PortIo(PortIo<SIZE>),
 }
 
-impl<const SIZE: usize> Io<SIZE> {
-    /// create a [`Io`] from a [`IoRaw`],
-    ///
-    /// some architectures do not differentiate between port io and MM io.
-    /// In that case defaults to `Io::MMIo`
-    ///
-    /// # SAFETY
-    ///
-    /// callers must ensure that `addr` is the start of a valid I/O
-    /// mapped memory region of size `maxsize` and that `addr` is safe to
-    /// access with the `ioread`/`iowrite` c functions.
-    ///
-    pub unsafe fn from_raw_cookie(raw: IoRaw<SIZE>) -> Result<Self> {
-        if is_mmio(raw.addr()) {
-            // SAFETY:
-            // by the check above we know that this address is MMIo
-            // it is up to the caller to ensure that it is a valid address
-            unsafe { Ok(Self::MMIo(MMIo::from_raw_cookie(raw))) }
-        } else if is_portio(raw.addr()) {
-            // SAFETY:
-            // by the check above we know that this address is PortIO
-            // it is up to the caller to ensure that it is a valid address
-            unsafe { Ok(Self::PortIo(PortIo::from_raw_cookie(raw))) }
-        } else {
-            Err(EINVAL)
-        }
-    }
-}
+impl<const SIZE: usize> Io<SIZE> {}
 
 macro_rules! define_io_enum_access_function {
     (@read $(#[$attr:meta])* $name_unchecked:ident, $name:ident, $type_name:ty) => {
@@ -689,6 +640,34 @@ unsafe impl<const SIZE: usize> IoAccess<SIZE> for Io<SIZE> {
             Self::PortIo(io) => io.addr(),
         }
     }
+
+    /// create a [`Io`] from a [`IoRaw`],
+    ///
+    /// some architectures do not differentiate between port io and MM io.
+    /// In that case defaults to `Io::MMIo`
+    ///
+    /// # SAFETY
+    ///
+    /// callers must ensure that `addr` is the start of a valid I/O
+    /// mapped memory region of size `maxsize` and that `addr` is safe to
+    /// access with the `ioread`/`iowrite` c functions.
+    ///
+    unsafe fn from_raw_cookie(raw: IoRaw<SIZE>) -> Result<Self> {
+        if is_mmio(raw.addr()) {
+            // SAFETY:
+            // by the check above we know that this address is MMIo
+            // it is up to the caller to ensure that it is a valid address
+            unsafe { Ok(Self::MMIo(MMIo::from_raw_cookie(raw)?)) }
+        } else if is_portio(raw.addr()) {
+            // SAFETY:
+            // by the check above we know that this address is PortIO
+            // it is up to the caller to ensure that it is a valid address
+            unsafe { Ok(Self::PortIo(PortIo::from_raw_cookie(raw)?)) }
+        } else {
+            Err(EINVAL)
+        }
+    }
+
     #[inline]
     fn maxsize(&self) -> usize {
         match &self {

@@ -11,7 +11,7 @@ use crate::{
     devres::Devres,
     driver,
     error::{to_result, Result},
-    io::{Io, IoRaw, MMIo, PortIo},
+    io::{Io, IoAccess, IoRaw},
     str::CStr,
     types::{ARef, ForeignOwnable, Opaque},
     ThisModule,
@@ -260,14 +260,14 @@ pub struct Device<Ctx: device::DeviceContext = device::Normal>(
 ///
 /// `Bar` always holds an `IoRaw` inststance that holds a valid pointer to the start of the I/O
 /// memory mapped PCI bar and its size.
-pub struct Bar<const SIZE: usize = 0> {
+pub struct Bar<const SIZE: usize = 0, I: IoAccess<SIZE> = Io<SIZE>> {
     pdev: ARef<Device>,
     original_ioptr: usize,
-    io: Io<SIZE>,
+    io: I,
     num: i32,
 }
 
-impl<const SIZE: usize> Bar<SIZE> {
+impl<const SIZE: usize, I: IoAccess<SIZE>> Bar<SIZE, I> {
     fn new(pdev: &Device, num: u32, name: &CStr) -> Result<Self> {
         let len = pdev.resource_len(num)?;
         if len == 0 {
@@ -311,25 +311,13 @@ impl<const SIZE: usize> Bar<SIZE> {
             }
         };
 
-        let io: Io<SIZE>;
-        // SAFETY:
-        // `pdev` is valid by the invariants of `Device`.
-        // `num` is checked for validity by a previous call to `Device::resource_len`.
-        let flags = unsafe { bindings::pci_resource_flags(pdev.as_raw(), num) };
-
-        if flags & bindings::IORESOURCE_IO as usize != 0 {
-            // SAFETY:
-            // we know that this is port io by the check above
-            // raw is valid to be accessed through ioread/write
-            io = unsafe { Io::PortIo(PortIo::from_raw_cookie(raw)) };
-        } else if flags & bindings::IORESOURCE_MEM as usize != 0 {
-            // SAFETY:
-            // we know that this is mm io by the check above
-            // raw is valid to be accessed through ioread/write
-            io = unsafe { Io::MMIo(MMIo::from_raw_cookie(raw)) };
-        } else {
-            return Err(EINVAL);
-        }
+        let io: I = match unsafe { I::from_raw_cookie(raw) } {
+            Ok(io) => io,
+            Err(err) => {
+                unsafe { Self::do_release(pdev, ioptr, num) };
+                return Err(err);
+            }
+        };
 
         Ok(Bar {
             pdev: pdev.into(),
@@ -366,14 +354,14 @@ impl Bar {
     }
 }
 
-impl<const SIZE: usize> Drop for Bar<SIZE> {
+impl<const SIZE: usize, I: IoAccess<SIZE>> Drop for Bar<SIZE, I> {
     fn drop(&mut self) {
         self.release();
     }
 }
 
-impl<const SIZE: usize> Deref for Bar<SIZE> {
-    type Target = Io<SIZE>;
+impl<const SIZE: usize, I: IoAccess<SIZE>> Deref for Bar<SIZE, I> {
+    type Target = I;
 
     fn deref(&self) -> &Self::Target {
         &self.io
@@ -415,12 +403,12 @@ impl Device {
 impl Device<device::Bound> {
     /// Mapps an entire PCI-BAR after performing a region-request on it. I/O operation bound checks
     /// can be performed on compile time for offsets (plus the requested type size) < SIZE.
-    pub fn iomap_region_sized<const SIZE: usize>(
+    pub fn iomap_region_sized<const SIZE: usize, I: IoAccess<SIZE>>(
         &self,
         bar: u32,
         name: &CStr,
-    ) -> Result<Devres<Bar<SIZE>>> {
-        let bar = Bar::<SIZE>::new(self, bar, name)?;
+    ) -> Result<Devres<Bar<SIZE, I>>> {
+        let bar = Bar::<SIZE, I>::new(self, bar, name)?;
         let devres = Devres::new(self.as_ref(), bar, GFP_KERNEL)?;
 
         Ok(devres)
@@ -428,7 +416,7 @@ impl Device<device::Bound> {
 
     /// Mapps an entire PCI-BAR after performing a region-request on it.
     pub fn iomap_region(&self, bar: u32, name: &CStr) -> Result<Devres<Bar>> {
-        self.iomap_region_sized::<0>(bar, name)
+        self.iomap_region_sized::<0, Io<0>>(bar, name)
     }
 }
 
