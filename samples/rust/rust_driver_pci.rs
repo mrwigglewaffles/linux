@@ -5,7 +5,13 @@
 //! To make this driver probe, QEMU must be run with `-device pci-testdev`.
 
 use kernel::{
-    bindings, c_str, device::Core, devres::Devres, io::IoAccess, pci, prelude::*, types::ARef,
+    bindings, c_str,
+    device::Core,
+    devres::Devres,
+    io::{Io, IoAccess},
+    pci,
+    prelude::*,
+    types::ARef,
 };
 
 struct Regs;
@@ -18,7 +24,7 @@ impl Regs {
     const END: usize = 0x10;
 }
 
-type Bar0 = pci::Bar<{ Regs::END }>;
+type Bar0 = pci::Bar<{ Regs::END }, Io<{ Regs::END }>>;
 
 #[derive(Debug)]
 struct TestIndex(u8);
@@ -75,7 +81,7 @@ impl pci::Driver for SampleDriver {
         pdev.enable_device_mem()?;
         pdev.set_master();
 
-        let bar = pdev.iomap_region_sized::<{ Regs::END }>(0, c_str!("rust_driver_pci"))?;
+        let bar = pdev.iomap_region_sized::<{ Regs::END }, _>(0, c_str!("rust_driver_pci"))?;
 
         let drvdata = KBox::new(
             Self {
