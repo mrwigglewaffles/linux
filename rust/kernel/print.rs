@@ -382,8 +382,14 @@ macro_rules! pr_info (
 #[doc(alias = "print")]
 macro_rules! pr_debug (
     ($($arg:tt)*) => (
-        if cfg!(debug_assertions) {
-            $crate::print_macro!($crate::print::format_strings::DEBUG, false, $($arg)*)
+        #[cfg(any(DYNAMIC_DEBUG_MODULE, CONFIG_DYNAMIC_DEBUG))]
+        { $crate::dynamic_pr_debug!($($arg)*); }
+
+        #[cfg(not(any(DYNAMIC_DEBUG_MODULE, CONFIG_DYNAMIC_DEBUG)))]
+        {
+            if cfg!(debug_assertions) {
+                $crate::print_macro!($crate::print::format_strings::DEBUG, false, $($arg)*)
+            }
         }
     )
 );
@@ -414,3 +420,111 @@ macro_rules! pr_cont (
         $crate::print_macro!($crate::print::format_strings::CONT, true, $($arg)*)
     )
 );
+
+#[cfg(CONFIG_DYNAMIC_DEBUG_CORE)]
+#[doc(hidden)]
+pub mod dynamic_debug {
+
+    pub use bindings::_ddebug;
+
+    use core::fmt;
+    use kernel::str::CStr;
+
+    #[doc(hidden)]
+    #[repr(transparent)]
+    pub struct _Ddebug {
+        pub inner: bindings::_ddebug,
+    }
+
+    impl _Ddebug {
+        pub const fn new(
+            modname: &'static CStr,
+            function: &'static CStr,
+            filename: &'static CStr,
+            format: &'static CStr,
+            line_num: u32,
+            class_id: u32,
+        ) -> Self {
+            let truncated_line = line_num & 0x3FF;
+            let truncated_class = (class_id & 0x3F) << 18;
+
+            let bit_flags: u32 = truncated_class | truncated_line;
+            let arr: [u8; 4] = bit_flags.to_ne_bytes();
+            let bits = bindings::__BindgenBitfieldUnit::new(arr);
+            Self {
+                inner: bindings::_ddebug {
+                    modname: modname.as_char_ptr(),
+                    function: function.as_char_ptr(),
+                    filename: filename.as_char_ptr(),
+                    format: format.as_char_ptr(),
+                    _bitfield_1: bits,
+                    ..unsafe { core::mem::zeroed() }
+                },
+            }
+        }
+    }
+
+    unsafe impl Send for _Ddebug {}
+    unsafe impl Sync for _Ddebug {}
+
+    #[doc(hidden)]
+    pub unsafe fn dynamic_pr_debug(descriptor: &mut _Ddebug, fmt: &CStr, args: fmt::Arguments<'_>) {
+        unsafe {
+            bindings::__dynamic_pr_debug(
+                &raw mut descriptor.inner,
+                fmt.as_char_ptr(),
+                (&raw const args).cast::<ffi::c_void>(),
+            );
+        }
+    }
+
+    /// TODO:
+    /// - add docs
+    /// - add SAFETY comments
+    /// - fix clippy lints
+    /// - dont make things public that should not be public
+    /// - make sure that the correct items are always in scope. im pretty sure that im missing a few
+    /// - test on other arches
+    #[macro_export]
+    macro_rules! dynamic_pr_debug {
+        ($($f:tt)*) => {{
+            use kernel::c_str;
+            use kernel::str::CStr;
+            use kernel::print::dynamic_debug::{_ddebug, _Ddebug};
+            use core::fmt;
+
+            const MOD_NAME: &CStr = c_str!(module_path!());
+            // right now rust does not have a function! macro so hard code this to be
+            // the name of the macro that is printing
+            const FN_NAME: &CStr = c_str!("pr_debug!");
+            const FILE_NAME: &CStr = c_str!(file!());
+            const MESSAGE: &CStr = c_str!("%pA");
+            const LINE: u32 = line!();
+            const CLASS_ID: u32 = (1 << 6) - 1;
+
+
+            #[link_section = "__dyndbg"]
+            static mut DEBUG_INFO: _Ddebug =
+                _Ddebug::new( MOD_NAME, FN_NAME, FILE_NAME, MESSAGE, LINE, CLASS_ID);
+
+
+            let should_print = unsafe {
+                ::kernel::jump_label::static_branch_unlikely!(
+                    DEBUG_INFO,
+                    _Ddebug,
+                    inner.key.dd_key_false
+                )
+            };
+
+            if should_print {
+                unsafe {
+                    $crate::print::dynamic_debug::dynamic_pr_debug(
+                        &mut DEBUG_INFO,
+                        MESSAGE,
+                        format_args!($($f)*)
+                    )
+                };
+            }
+        }};
+    }
+}
