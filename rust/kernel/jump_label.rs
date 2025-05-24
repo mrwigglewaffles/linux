@@ -19,9 +19,9 @@
 /// The macro must be used with a real static key defined by C.
 #[macro_export]
 macro_rules! static_branch_unlikely {
-    ($key:path, $keytyp:ty, $field:ident) => {{
+    ($key:path, $keytyp:ty, $field:ident $(.$field_cont:ident)*) => {{
         let _key: *const $keytyp = ::core::ptr::addr_of!($key);
-        let _key: *const $crate::bindings::static_key_false = ::core::ptr::addr_of!((*_key).$field);
+        let _key: *const $crate::bindings::static_key_false = ::core::ptr::addr_of!((*_key).$field$(.$field_cont)*);
         let _key: *const $crate::bindings::static_key = _key.cast();
 
         #[cfg(not(CONFIG_JUMP_LABEL))]
@@ -30,7 +30,7 @@ macro_rules! static_branch_unlikely {
         }
 
         #[cfg(CONFIG_JUMP_LABEL)]
-        $crate::jump_label::arch_static_branch! { $key, $keytyp, $field, false }
+        $crate::jump_label::arch_static_branch! { $key, $keytyp, $field$(.$field_cont)*, false }
     }};
 }
 pub use static_branch_unlikely;
@@ -46,14 +46,14 @@ const _: &str = include!(concat!(
 #[doc(hidden)]
 #[cfg(CONFIG_JUMP_LABEL)]
 macro_rules! arch_static_branch {
-    ($key:path, $keytyp:ty, $field:ident, $branch:expr) => {'my_label: {
+    ($key:path, $keytyp:ty, $field:ident $(.$field_cont:ident)*, $branch:expr) => {'my_label: {
         $crate::asm!(
             include!(concat!(env!("OBJTREE"), "/rust/kernel/generated_arch_static_branch_asm.rs"));
             l_yes = label {
                 break 'my_label true;
             },
             symb = sym $key,
-            off = const ::core::mem::offset_of!($keytyp, $field),
+            off = const ::core::mem::offset_of!($keytyp, $field$(.$field_cont)*),
             branch = const $crate::jump_label::bool_to_int($branch),
         );
 
