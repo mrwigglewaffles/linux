@@ -442,5 +442,90 @@ macro_rules! dev_info {
 /// ```
 #[macro_export]
 macro_rules! dev_dbg {
-    ($($f:tt)*) => { $crate::dev_printk!(pr_dbg, $($f)*); }
+    ($($f:tt)*) => {
+        #[cfg(any(DYNAMIC_DEBUG_MODULE, CONFIG_DYNAMIC_DEBUG))]
+        { $crate::dynamic_dev_dbg!($($f)*); }
+
+        #[cfg(not(any(DYNAMIC_DEBUG_MODULE, CONFIG_DYNAMIC_DEBUG)))]
+        { $crate::dev_printk!(pr_dbg, $($f)*); }
+    }
+}
+
+#[cfg(CONFIG_DYNAMIC_DEBUG_CORE)]
+#[doc(hidden)]
+pub mod dynamic_debug {
+
+    use super::*;
+    use crate::str::CStr;
+    use kernel::print::dynamic_debug::_Ddebug;
+
+    #[doc(hidden)]
+    #[inline]
+    pub unsafe fn dynamic_dev_dbg(
+        descriptor: &mut _Ddebug,
+        dev: &Device,
+        fmt: &CStr,
+        args: fmt::Arguments<'_>,
+    ) {
+        unsafe {
+            bindings::__dynamic_dev_dbg(
+                &raw mut descriptor.inner,
+                dev.as_raw(),
+                fmt.as_char_ptr(),
+                (&raw const args).cast::<ffi::c_void>(),
+            )
+        };
+    }
+
+    /// TODO:
+    /// - add docs
+    /// - integrate this with `Device`
+    /// - add SAFETY comments
+    /// - fix clippy lints
+    /// - dont make things public that should not be public
+    /// - make sure that the correct items are always in scope. im pretty sure that im missing a few
+    /// - properly set MOD_NAME; might have to set an enviroment varible
+    /// - test on other arches
+    #[macro_export]
+    macro_rules! dynamic_dev_dbg {
+        ($dev:expr, $($f:tt)*) => {{
+            use kernel::c_str;
+            use kernel::str::CStr;
+            use kernel::print::dynamic_debug::{_ddebug, _Ddebug};
+            use core::fmt;
+
+            const MOD_NAME: &CStr = c_str!(module_path!());
+            // right now rust does not have a function! macro so hard code this to be
+            // the name of the macro that is printing
+            const FN_NAME: &CStr = c_str!("dev_dbg!");
+            const FILE_NAME: &CStr = c_str!(file!());
+            const MESSAGE: &CStr = c_str!("%pA");
+            const LINE: u32 = line!();
+            const CLASS_ID: u32 = (1 << 6) - 1;
+
+            #[link_section = "__dyndbg"]
+            static mut DEBUG_INFO: _Ddebug =
+                _Ddebug::new( MOD_NAME, FN_NAME, FILE_NAME, MESSAGE, LINE, CLASS_ID);
+
+
+            let should_print = unsafe {
+                ::kernel::jump_label::static_branch_unlikely!(
+                    DEBUG_INFO,
+                    _Ddebug,
+                    inner.key.dd_key_false
+                )
+            };
+
+            if should_print {
+                unsafe {
+                    $crate::device::dynamic_debug::dynamic_dev_dbg(
+                        &mut DEBUG_INFO,
+                        $dev,
+                        MESSAGE,
+                        format_args!($($f)*)
+                    )
+                };
+            }
+        }};
+    }
 }
